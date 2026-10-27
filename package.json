@@ -1,6 +1,6 @@
 {
   "name": "grokbot-cli-mcp",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Grok coding agent for your terminal (built on pi) and an MCP server so Claude Code can use Grok: X/web search, vision, image/video generation and full agent delegation.",
   "type": "module",
   "bin": {
