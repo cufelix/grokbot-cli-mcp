@@ -127,13 +127,44 @@ grokbot bot list                                  # your bots
 grokbot bot send "summarize my unread email"      # message your main bot, print its replies
 grokbot bot send --bot "giggle work" --no-wait "..."
 grokbot bot read --bot "Grok Bot" 20              # last 20 messages
+grokbot bot create "Design QA" "Clicks through sites like a real user"
+```
+
+`send` waits until the bot has really finished (bots often reply "on it" first and keep working) and shows what it is
+doing meanwhile. Bots work on their own computer, with a real browser, so they can test a site the way a user would:
+
+```bash
+grokbot bot send --bot "Design QA" --download ./qa \
+  "Open https://example.com, sign up, check out, screenshot desktop and mobile, list every design and UX problem"
+grokbot bot send --file mockup.png "Does the live page match this mockup?"   # attach local files
+grokbot bot wait --download ./qa                  # still working after a timeout? wait for the rest
+grokbot bot stop                                  # stop whatever it is doing
+grokbot bot files                                 # files the bot saved
+grokbot bot download <path> ./qa                  # any file it sent or saved (never overwrites)
+```
+
+**On your own computer.** With the Grok Bot app open on a computer, a bot can work there instead, so it can test
+`localhost`. Each command it wants to run there asks for your approval in the app; `send` and `wait` show the request
+and keep waiting while it is pending.
+
+```bash
+grokbot bot computers                             # computers with the Grok Bot app open
+grokbot bot send --computer "Try the signup flow on http://localhost:3000"
+grokbot bot send --computer=work-laptop "..."     # pick one when several are open
 ```
 
 Inside `grokbot` itself, each bot is also a model: pick one with `/model` (or `grokbot --model grok-bot`) and chat
-with it right in the TUI; switch bots the same way. Messages appear in the app as sent by you, and Claude Code gets the same through the MCP tools `bot_list`,
-`bot_read` and `bot_send`. This is an **unofficial** client of the app's private API (the requests the app itself makes,
-with your own login): it can break when the app updates, and using it is at your own risk under xAI's and Cursor's terms.
-The token comes from `~/.config/cursor/auth.json` (`cursor-agent login`) or `CURSOR_ACCESS_TOKEN`.
+with it right in the TUI; switch bots the same way. Messages appear in the app as sent by you.
+
+Claude Code gets the same through MCP: `bot_send` (with `files` (images), `computer` and `download_dir`; screenshots come back
+inline, so Claude sees them, and the bot's activity arrives as progress), `bot_wait`, `bot_read`, `bot_stop`,
+`bot_list`, `bot_create`, `bot_computers`, `bot_files` and `bot_download`. For example: _"build the page, then have
+the Design QA bot click through it on my computer and fix what it finds"_.
+
+This is an **unofficial** client of the app's private API (the requests the app itself makes, with your own login): it
+can break when the app updates, and using it is at your own risk under xAI's and Cursor's terms. The token comes from
+`cursor-agent login` (the macOS Keychain, or `~/.config/cursor/auth.json` on Linux) or `CURSOR_ACCESS_TOKEN`
+(`GROKBOT_KEYCHAIN=0` skips the Keychain); it is only sent to the API, over HTTPS.
 
 ## Skills
 
@@ -148,7 +179,22 @@ The grokbot agent (and so `grok_agent`) reads and writes files and runs shell co
 Claude Code do. Point `grok_agent` only at directories you trust, and prefer `read_only: true` for research and reviews.
 The MCP tools carry annotations (`grok_agent` is marked destructive), so hosts like Claude Code ask before running it
 unless you allow it. Image sources must be real images, downloads only reach public hosts, and generated files stay
-inside the working directory. pi's [security notes](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/security.md)
+inside the working directory.
+
+Bots browse pages anyone can write, and their replies reach the model calling the MCP tools, so the bot tools treat
+what that model asks for as untrusted:
+
+- `bot_send` attaches only real images, never hidden files (no `~/.ssh`, no `.env`). To let it send other files from
+  the working directory, start the server with `GROKBOT_MCP_SEND_FILES=1`; the model can't turn that on.
+- Files from a bot are saved in a temp folder, or under `.grokbot/bot-files` in the working directory (never where a
+  test runner or linter picks files up), under plain names, never over an existing file, readable only by you.
+- Bot text loses terminal control characters and is capped; the tool descriptions mark it as untrusted.
+- The Cursor token only goes to `*.cursor.sh` over HTTPS, without following redirects.
+
+Still, `bot_send`, `bot_create` and `bot_stop` are marked destructive: a bot can browse, email and act as you, and
+with `computer` it runs commands on your machine. Approve each command in the Grok Bot app rather than "always", and
+use `bot_stop` if a run goes wrong. `grok_agent` runs as your user, so it could read the Cursor login too: keep it on
+directories you trust. pi's [security notes](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/security.md)
 apply; its example `sandbox` and `permission-gate` extensions can add a boundary or approvals.
 
 ## Development

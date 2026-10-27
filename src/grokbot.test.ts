@@ -1,15 +1,15 @@
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { beforeAll, describe, expect, it } from "vitest";
-import { botSlugs, parseEntries, pickBot } from "./bots.js";
+import { botSlugs, parseEntries, pickBot, pickComputer, safeName, writeNew } from "./bots.js";
 import { registerSkillSearch, SKILL_INDEX_LIMIT, searchSkills } from "./skills.js";
 import { buildPrompt, canWrite, describeCursorTool, parseToolCalls, visibleText } from "./cursor.js";
 import grokbotExtension, { isBareLogin, LOGIN_CHOICES } from "./extension.js";
-import { type AgentEvent, agentArgs, createGrokMcpServer, formatAgentRun, summarizeAgentEvents } from "./mcp.js";
+import { type AgentEvent, agentArgs, attachable, createGrokMcpServer, formatAgentRun, saveDir, summarizeAgentEvents } from "./mcp.js";
 import { browserCommand } from "./login.js";
 import { configureEnv, DEFAULT_MODEL, seedDefaultModel } from "./setup.js";
 import { isPrivateAddress, loadImage, outputPath, sniffImage } from "./xai.js";
@@ -24,6 +24,7 @@ beforeAll(() => {
   process.env.PI_OFFLINE = "1";
   // No Cursor login either: the bots provider must stay off without touching the network.
   delete process.env.CURSOR_ACCESS_TOKEN;
+  process.env.GROKBOT_KEYCHAIN = "0";
   process.env.XDG_CONFIG_HOME = tmp();
 });
 
@@ -110,9 +111,15 @@ describe("MCP server", () => {
   it("exposes the Grok tools", async () => {
     const { tools } = await (await connect()).listTools();
     expect(tools.map((t) => t.name).sort()).toEqual([
+      "bot_computers",
+      "bot_create",
+      "bot_download",
+      "bot_files",
       "bot_list",
       "bot_read",
       "bot_send",
+      "bot_stop",
+      "bot_wait",
       "grok_agent",
       "grok_ask",
       "grok_generate_image",
@@ -372,12 +379,115 @@ describe("Grok Bot app client", () => {
       { seq: "4", body: b64({ kind: "send-message", message: { type: "attachment", file_name: "a.xlsx" } }) },
       { seq: "5", body: b64({ kind: "tool-call", name: "shell" }) },
       { seq: "6", body: "not base64 json" },
+      { seq: "7", body: b64({ kind: "send-message", message: { type: "attachment", file_name: "shot.png", url: "file:///box/assets/ab.png" } }) },
+      { seq: "8", body: b64({ kind: "user-attachment", file_path: "store://spec.pdf", file_name: "spec.pdf" }) },
     ]);
     expect(entries).toEqual([
       { seq: 2, from: "you", text: "ping" },
       { seq: 3, from: "bot", text: "pong" },
       { seq: 4, from: "bot", text: "[file: a.xlsx]" },
+      { seq: 7, from: "bot", text: "[file: shot.png]", file: { path: "file:///box/assets/ab.png", name: "shot.png" } },
+      { seq: 8, from: "you", text: "[file: spec.pdf]", file: { path: "store://spec.pdf", name: "spec.pdf" } },
     ]);
+  });
+
+  it("picks a computer by id or label, and only defaults when there is exactly one", () => {
+    const mac = { machineId: "m1", label: "Jane's MacBook", kind: "desktop", lastSeenAtMs: 0 };
+    const pc = { machineId: "m2", label: "linux-box", kind: "desktop", lastSeenAtMs: 0 };
+    expect(pickComputer([mac]).machineId).toBe("m1");
+    expect(pickComputer([mac, pc], "LINUX").machineId).toBe("m2");
+    expect(pickComputer([mac, pc], "m1").label).toBe("Jane's MacBook");
+    expect(() => pickComputer([mac, pc])).toThrow(/Several computers/);
+    expect(() => pickComputer([], undefined)).toThrow(/Open the Grok Bot app/);
+    expect(() => pickComputer([mac], "nope")).toThrow(/Computers: Jane's MacBook/);
+    expect(() => pickComputer([mac, { ...pc, label: "Jane's iMac" }], "jane")).toThrow(/matches several computers/);
+  });
+
+  it("shows the bot's requests to act on the user's computer, with their state", () => {
+    const ask = (status: string) =>
+      b64({ kind: "send-message", message: { type: "local-tool-permission", ask: { action: "run-command", target: "ls", status } } });
+    expect(parseEntries([{ seq: "1", body: ask("pending") }, { seq: "2", body: ask("allowed") }])).toEqual([
+      {
+        seq: 1,
+        from: "bot",
+        text: "[asks to run-command on your computer (waiting for approval in the Grok Bot app): ls]",
+        approval: { action: "run-command", target: "ls", status: "pending" },
+      },
+      { seq: 2, from: "bot", text: "[asks to run-command on your computer (allowed): ls]", approval: { action: "run-command", target: "ls", status: "allowed" } },
+    ]);
+  });
+
+  it("ignores malformed transcript fields instead of failing the whole chat", () => {
+    const entries = parseEntries([
+      { seq: "1", body: b64({ kind: "send-message", message: { type: "attachment", file_name: 42, url: { evil: true } } }) },
+      { seq: "2", body: b64({ kind: "user-attachment", file_path: ["x"] }) },
+      { seq: "x", body: b64({ kind: "message", role: "user", content: "no seq" }) },
+      { seq: "3", body: b64(null as never) },
+    ]);
+    expect(entries).toEqual([{ seq: 1, from: "bot", text: "[file: attachment]" }]);
+  });
+
+  it("only lets a tool call send images (project files when enabled), never hidden ones", () => {
+    const cwd = tmp();
+    const outside = tmp();
+    const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0, 0, 0, 0, 0]);
+    writeFileSync(join(cwd, "spec.md"), "# spec");
+    writeFileSync(join(outside, "shot.png"), png);
+    writeFileSync(join(outside, "id_rsa"), "-----BEGIN KEY-----");
+    writeFileSync(join(cwd, ".env"), "SECRET=1");
+    mkdirSync(join(outside, ".ssh"));
+    writeFileSync(join(outside, ".ssh", "pic.png"), png);
+    symlinkSync(join(outside, "id_rsa"), join(cwd, "innocent.txt"));
+    expect(attachable(join(outside, "shot.png"), cwd)).toMatch(/shot\.png$/);
+    expect(() => attachable("spec.md", cwd)).toThrow(/GROKBOT_MCP_SEND_FILES/);
+    expect(attachable("spec.md", cwd, true)).toMatch(/spec\.md$/);
+    expect(() => attachable(join(outside, "id_rsa"), cwd, true)).toThrow(/Only images/);
+    expect(() => attachable("innocent.txt", cwd, true)).toThrow(/Only images/);
+    expect(() => attachable(".env", cwd, true)).toThrow(/hidden/);
+    expect(() => attachable(join(outside, ".ssh", "pic.png"), cwd)).toThrow(/hidden/);
+  });
+
+  it("saves into the temp folder as asked, project files only under .grokbot/bot-files, never elsewhere", () => {
+    expect(saveDir("qa", tmp())).toMatch(/[\\/]\.grokbot[\\/]bot-files[\\/]qa$/);
+    expect(saveDir(join(tmp(), "shots"))).toMatch(/shots$/);
+    const project = mkdtempSync(join(homedir(), "grokbot-test-"));
+    try {
+      expect(saveDir(undefined, project)).toBe(join(project, ".grokbot", "bot-files"));
+      expect(saveDir("tests", project)).toBe(join(project, ".grokbot", "bot-files", "tests"));
+    } finally {
+      rmSync(project, { recursive: true });
+    }
+    // A project inside the temp folder still gets .grokbot/bot-files, and a symlinked .grokbot can't lead out.
+    const tmpProject = tmp();
+    expect(saveDir(undefined, tmpProject)).toBe(join(tmpProject, ".grokbot", "bot-files"));
+    const trap = tmp();
+    const elsewhere = tmp();
+    symlinkSync(elsewhere, join(trap, ".grokbot"));
+    expect(() => saveDir(undefined, trap)).toThrow(/outside the working directory/);
+    expect(existsSync(join(elsewhere, "bot-files"))).toBe(false);
+    expect(() => saveDir(join(homedir(), "Library", "LaunchAgents"), tmp())).toThrow(/working directory/);
+    expect(() => saveDir(".git/hooks", tmp())).toThrow(/hidden/);
+    const work = tmp();
+    symlinkSync(homedir(), join(work, "home"));
+    expect(() => saveDir("home/evil", work)).toThrow(/working directory/);
+  });
+
+  it("turns the bot's file names into plain visible names", () => {
+    expect(safeName("../../.zshrc")).toBe("zshrc");
+    expect(safeName("..")).toBe("file");
+    expect(safeName("a\\b\u0007c.png")).toBe("bc.png");
+    expect(safeName("shot.png")).toBe("shot.png");
+    const ansi = Buffer.from(JSON.stringify({ kind: "send-message", message: { type: "text", content: "ok\u001b[2J\u009b31m done" } })).toString("base64");
+    expect(parseEntries([{ seq: "1", body: ansi }])[0].text).toBe("ok[2J31m done");
+  });
+
+  it("saves downloads as new files, never over an existing one or through a symlink", () => {
+    const dir = tmp();
+    writeFileSync(join(dir, "victim.txt"), "keep");
+    symlinkSync(join(dir, "victim.txt"), join(dir, "shot.png"));
+    expect(writeNew(dir, "shot.png", Buffer.from("a"))).toBe(join(dir, "shot-2.png"));
+    expect(writeNew(dir, "shot.png", Buffer.from("b"))).toBe(join(dir, "shot-3.png"));
+    expect(readFileSync(join(dir, "victim.txt"), "utf8")).toBe("keep");
   });
 
   it("picks a bot by id, name or prefix, defaulting to the main bot", () => {
