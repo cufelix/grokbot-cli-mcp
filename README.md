@@ -14,6 +14,10 @@
 2. **An MCP server** (`grokbot mcp`) so Claude Code, Cursor, Codex or any MCP host can use Grok:
    ask it, search X/web through it, generate media, or delegate a whole task to the grokbot agent.
 
+It also drives your bots in the **Grok Bot** desktop app (`grokbot bot`, `bot_*` MCP tools): message them, wait for the
+real end of their work, send and fetch files, and let them test sites in a real browser, even on your own computer
+([details](#your-bots-in-the-grok-bot-app)).
+
 Works on **Linux, macOS and Windows** (Node.js ≥ 22.19).
 
 ```
@@ -22,6 +26,7 @@ pi + grok ext ──┤
                 └─ grokbot mcp ──── Claude Code ─ grok_ask · grok_search_x · grok_search_web
                                                   grok_generate_image · grok_generate_video
                                                   grok_agent ─▶ grokbot --mode json (files, shell, its own MCPs)
+                                                  bot_send · bot_wait · bot_download … ─▶ Grok Bot app bots
 ```
 
 ## Install
@@ -97,6 +102,7 @@ _"have the grok agent audit src/auth and report back"_.
 | `grok_generate_video` | Text-to-video or image-to-video. Saved locally, returns the path. |
 | `grok_agent` | Runs the full grokbot agent in `directory`. Returns its answer, tool trail, cost and a `session_id` you can pass back to continue. Sends MCP progress per tool call. `read_only: true` limits it to read/search tools (no shell, no edits, no MCP servers). |
 | `grok_models` | Lists Grok model ids, context sizes and prices. |
+| `bot_*` | Your Grok Bot app bots: `bot_send`, `bot_wait`, `bot_read`, `bot_stop`, `bot_list`, `bot_create`, `bot_computers`, `bot_files`, `bot_download` ([below](#your-bots-in-the-grok-bot-app)). |
 
 The MCP server uses the same credentials as the CLI (`XAI_API_KEY`, or whatever you signed in with via `/login`).
 
@@ -214,6 +220,12 @@ node scripts/smoke.mjs "node dist/cli.js"   # or after `npm i -g .`: node script
 | `src/mcp.ts` | MCP server |
 | `src/xai.ts` | xAI search / image / video calls (shared by both) |
 | `src/setup.ts` | Config dir, env aliases, default model |
+| `src/login.ts` | `grokbot login` / `logout` |
+| `src/cursor.ts` | Grok through `cursor-agent` (Cursor sign-in) |
+| `src/skills.ts` | `find_skill`: skills on demand |
+| `src/bots.ts` | Grok Bot app client (send, wait, files, computers) |
+| `src/bot-cli.ts` | `grokbot bot ...` commands |
+| `src/bot-provider.ts` | Bots as `/model` models in the TUI |
 
 Releases: bump `version`, publish a GitHub release, and `.github/workflows/publish.yml` publishes to npm
 (needs an `NPM_TOKEN` repo secret).
