@@ -1,6 +1,7 @@
 // Single-use, purpose-bound inbox files shared by vault logins and bot secrets.
-import { linkSync, lstatSync, renameSync, unlinkSync } from "node:fs";
+import { closeSync, fstatSync, linkSync, lstatSync, renameSync, unlinkSync } from "node:fs";
 import { randomUUID } from "node:crypto";
+import { openRegularFile } from "./local-files.js";
 export const INBOX_MAX_AGE_MS = 15 * 60 * 1000;
 const STALE = "The staged file is older than 15 minutes. Delete it and stage the value again.";
 const same = (a: { dev: number; ino: number }, b: { dev: number; ino: number }) => a.dev === b.dev && a.ino === b.ino;
@@ -55,23 +56,31 @@ export async function withInboxValue(dir: string, file: string, what: string, re
       // leave the claimed copy
     }
   };
+  let held: number | undefined;
   try {
-    if (swapped) throw new Error("The staged file changed while it was being taken. Delete it and stage the value again.");
-    if (stale(claimedId.mtimeMs)) throw new Error(STALE);
-    const value = readValue(claimed);
-    // The value was read by path: it counts only if the name still points at the file that was claimed.
-    if (!dirOk() || !same(lstatSync(claimed), claimedId))
-      throw new Error("The staged file changed while it was being read. Delete it and stage the value again.");
-    await use(value);
-  } catch (err) {
-    restore();
-    throw err;
-  }
-  try {
-    if (!dirOk() || !same(lstatSync(claimed), claimedId)) throw new Error("changed");
-    unlinkSync(claimed);
-    return undefined;
-  } catch {
-    return `The staged file may still exist (${claimed}, or ${file}): delete it yourself.`;
+    try {
+      if (swapped) throw new Error("The staged file changed while it was being taken. Delete it and stage the value again.");
+      if (stale(claimedId.mtimeMs)) throw new Error(STALE);
+      // Keep the inode alive across the asynchronous delivery: Linux can otherwise reuse it immediately
+      // after unlink, making a different file appear to have the same device/inode at cleanup.
+      held = openRegularFile(claimed);
+      if (!same(fstatSync(held), claimedId)) throw new Error("The staged file changed while it was being opened.");
+      const value = readValue(claimed);
+      if (!dirOk() || !same(lstatSync(claimed), claimedId))
+        throw new Error("The staged file changed while it was being read. Delete it and stage the value again.");
+      await use(value);
+    } catch (err) {
+      restore();
+      throw err;
+    }
+    try {
+      if (!dirOk() || !same(lstatSync(claimed), claimedId)) throw new Error("changed");
+      unlinkSync(claimed);
+      return undefined;
+    } catch {
+      return `The staged file may still exist (${claimed}, or ${file}): delete it yourself.`;
+    }
+  } finally {
+    if (held !== undefined) closeSync(held);
   }
 }

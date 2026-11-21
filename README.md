@@ -204,8 +204,9 @@ host to refresh its tool list after rebuilding this checkout.
 
 ## MCP context budget
 
-Bot replies and agent answers use a 12,000-character preview by default. Longer results are saved in full as private
+Bot replies and agent answers use a 12,000-character preview by default. Longer results are saved in full as
 text files under `.grokbot/bot-files`; the response links to the file so the host can read just the relevant part.
+Files use mode `0600` on POSIX; on native Windows, privacy depends on the output directory's inherited ACLs.
 Session ids and wait cursors precede the answer and remain visible. If saving fails, the preview says so. The
 server-owned `GROKBOT_MCP_MAX_TEXT` environment variable accepts 1000–60000 characters.
 
@@ -330,6 +331,9 @@ what that model asks for as untrusted:
 
 The vault tools are built so a secret never has to pass through a model:
 
+- Secure inboxes require macOS/Linux/WSL ownership and permissions. Native Windows refuses inbox operations;
+  explicit CLI `--password-stdin` / `--value-stdin` inputs remain available. Inbox privacy does not rely on Windows
+  mode bits, which do not describe ACL access.
 - Nothing returns a password, a card number or a CVV — the API itself has no field for them, so `vault_list` can show
   that a login exists without being able to leak it.
 - `vault_add_login` has no password, env-var or path argument. The only source is `~/.grokbot/vault-inbox/<site>`

@@ -17,6 +17,7 @@ import { lstatSync, mkdirSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { withInboxValue } from "./inbox.js";
+import { requirePosixInbox } from "./local-files.js";
 export { INBOX_MAX_AGE_MS } from "./inbox.js";
 import { listManagedBots } from "./manage.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -223,6 +224,7 @@ export async function pendingSecretRequests(bot: SecretBot, signal?: AbortSignal
  * user chose, and a model can't point it at an env var or a file of its own choosing (a token, an SSH key).
  */
 export function secretInbox(): string {
+  requirePosixInbox();
   const configured = join(process.env.GROKBOT_SECRET_INBOX || join(homedir(), ".grokbot", "secret-inbox"));
   mkdirSync(configured, { recursive: true, mode: 0o700 });
   // Resolve parent symlinks once; everything after works on this real path.

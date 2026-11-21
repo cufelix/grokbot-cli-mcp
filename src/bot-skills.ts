@@ -4,10 +4,11 @@
 //
 // Methods, as the app's service table names them: ListGrokBotAgentSkills, UpdateGrokBotAgentSkill,
 // AddGrokBotAgentSkill, RemoveGrokBotAgentSkill, MakeGrokBotAgentSkillPrivate. There is no Get: getSkill reads the list.
-import { closeSync, constants, fstatSync, openSync, readSync } from "node:fs";
+import { closeSync, fstatSync, readSync } from "node:fs";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { listBots, pickBot, pickBotExact, rpc } from "./bots.js";
+import { openRegularFile } from "./local-files.js";
 
 /** Limits on what we send and show, checked here so the CLI and the MCP tools both get them. */
 export const SKILL_LIMITS = { name: 64, description: 500, body: 20_000 } as const;
@@ -297,8 +298,9 @@ function readSkillFile(path: string): string {
   const max = SKILL_LIMITS.body * 4;
   let fd: number;
   try {
-    fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    fd = openRegularFile(path);
   } catch (err) {
+    if (err instanceof Error && /regular file/.test(err.message)) throw err;
     throw new Error(`Cannot open ${path} (a symlink, or not readable): ${(err as NodeJS.ErrnoException).code ?? "error"}.`);
   }
   try {

@@ -34,7 +34,7 @@ describe("bounded model output", () => {
     const file = result.match(/Full untrusted output: (.+?)\. Read/)![1];
     expect(file.startsWith(join(cwd, ".grokbot", "bot-files"))).toBe(true);
     expect(readFileSync(file, "utf8")).toBe(text);
-    expect(lstatSync(file).mode & 0o777).toBe(0o600);
+    if (process.platform !== "win32") expect(lstatSync(file).mode & 0o777).toBe(0o600);
     expect(file.endsWith(".txt")).toBe(true);
   });
   it("does not follow an artifact directory symlink outside the workspace", () => {

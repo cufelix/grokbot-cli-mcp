@@ -4,11 +4,12 @@
 // Secrets go one way. Creating or updating a login takes a password; GrokBotVaultCredential, what every read returns,
 // has no password field. On top of that, nothing derived from a secret-bearing call's response is shown: errors become
 // fixed local messages (an error body could echo the request) and a confirmation is built from what we sent.
-import { closeSync, constants, fstatSync, lstatSync, mkdirSync, openSync, readSync } from "node:fs";
+import { closeSync, fstatSync, lstatSync, mkdirSync, readSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { realpathSync } from "node:fs";
 import { withInboxValue } from "./inbox.js";
+import { openRegularFile, requirePosixInbox } from "./local-files.js";
 import { domainToUnicode } from "node:url";
 import { randomUUID } from "node:crypto";
 import { rpc } from "./bots.js";
@@ -399,8 +400,9 @@ export async function deleteFormEntry(entryId: string, signal?: AbortSignal): Pr
 export function readSecretFile(path: string): string {
   let fd: number;
   try {
-    fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    fd = openRegularFile(path);
   } catch (err) {
+    if (err instanceof Error && /symlink|regular file|changed while/.test(err.message)) throw err;
     const code = (err as NodeJS.ErrnoException).code;
     throw new Error(code === "ELOOP" ? `${path} is a symlink; give the file itself.` : `Can't open ${path} (${code ?? "error"}).`);
   }
@@ -429,6 +431,7 @@ export function readSecretFile(path: string): string {
  * it at an arbitrary env var or file (a Cursor token, an SSH key) or at a host of its own.
  */
 export function vaultInbox(): string {
+  requirePosixInbox();
   const configured = join(process.env.GROKBOT_VAULT_INBOX || join(homedir(), ".grokbot", "vault-inbox"));
   mkdirSync(configured, { recursive: true, mode: 0o700 });
   const dir = join(realpathSync(dirname(configured)), basename(configured));

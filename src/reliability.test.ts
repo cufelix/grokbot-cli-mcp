@@ -5,7 +5,9 @@ import { join } from "node:path";
 import { deleteAutomation, runAutomationNow, toAutomation } from "./automations.js";
 import { putBotSecretFromInbox, putBotSecret, listBotSecrets, findSecretBot } from "./secrets.js";
 import { startFreshConversation } from "./manage.js";
-import { createLoginFromInbox, putFormEntry } from "./vault.js";
+import { createLoginFromInbox, putFormEntry, vaultInbox } from "./vault.js";
+import { secretInbox } from "./secrets.js";
+import { requirePosixInbox } from "./local-files.js";
 import contract from "../fixtures/grokbot-app-contract.json";
 import { makeSkillPrivate } from "./bot-skills.js";
 
@@ -24,6 +26,16 @@ beforeEach(() => {
 afterEach(() => { vi.unstubAllGlobals(); vi.unstubAllEnvs(); });
 
 describe("live API contract regressions", () => {
+  it("fails closed for Windows inboxes with a supported alternative", () => {
+    expect(() => requirePosixInbox("win32")).toThrow(/WSL.*stdin/);
+  });
+  it("retains POSIX inbox support", () => {
+    for (const platform of ["linux", "darwin"] as const) expect(() => requirePosixInbox(platform)).not.toThrow();
+  });
+  it.runIf(process.platform === "win32")("refuses actual native Windows inbox operations before creating directories", () => {
+    expect(() => vaultInbox()).toThrow(/WSL/);
+    expect(() => secretInbox()).toThrow(/WSL/);
+  });
   it("runs an owned routine with the real four-member permission enum", async () => {
     await runAutomationNow(target);
     expect(calls.filter(c => c.method === "RunGrokBotAgentAutomationNow")).toEqual([{ method: "RunGrokBotAgentAutomationNow", body: { agentId: "uuid-1", automationId: "auto-1" } }]);
@@ -77,7 +89,7 @@ describe("live API contract regressions", () => {
     await expect(makeSkillPrivate("uuid-1", "own")).rejects.toThrow(/Only an inherited plugin/);
     expect(calls.some(c => c.method === "MakeGrokBotAgentSkillPrivate")).toBe(false);
   });
-  it("applies the same stale-file protection to login and OTP inboxes", async () => {
+  it.skipIf(process.platform === "win32")("applies the same stale-file protection to login and OTP inboxes", async () => {
     const root = mkdtempSync(join(tmpdir(), "vault-stale-")), inbox = join(root, "inbox");
     mkdirSync(inbox, { mode: 0o700 }); vi.stubEnv("GROKBOT_VAULT_INBOX", inbox);
     const file = join(inbox, "audit.example.com"); writeFileSync(file, "synthetic-value");

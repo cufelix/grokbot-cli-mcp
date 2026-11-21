@@ -236,7 +236,7 @@ describe("waiting requests", () => {
   });
 });
 
-describe("inbox", () => {
+describe.skipIf(process.platform === "win32")("inbox", () => {
   it("is a private real directory", () => {
     const dir = secretInbox();
     expect(realpathSync(dir)).toBe(realpathSync(inbox));
@@ -404,7 +404,7 @@ describe("MCP tools", () => {
     expect(out).toContain("e-1  Code");
   });
 
-  it("answers a request from the inbox file and never echoes the value", async () => {
+  it.skipIf(process.platform === "win32")("answers a request from the inbox file and never echoes the value", async () => {
     stub({ ListGrokBotAgents: BOTS, SubmitGrokBotSecret: [200, { accepted: true, refusal: undefined }] });
     secretInbox();
     writeFileSync(join(inbox, `submit.${UUID}.e-1`), `${VALUE}\n`);
@@ -415,7 +415,7 @@ describe("MCP tools", () => {
     expect(readdirSync(inbox)).toEqual([]);
   });
 
-  it("returns a constant error with the file path when nothing is staged, and when the bot refuses", async () => {
+  it.skipIf(process.platform === "win32")("returns a constant error with the file path when nothing is staged, and when the bot refuses", async () => {
     stub({ ListGrokBotAgents: BOTS, SubmitGrokBotSecret: [200, { accepted: false, refusal: { message: VALUE } }] });
     const client = await connect();
     const none = await client.callTool({ name: "bot_submit_secret", arguments: { bot: "Kiwi", entry_id: "e-1" } });
@@ -457,7 +457,7 @@ describe("MCP tools", () => {
     expect(text(r)).not.toMatch(/[\u0000-\u001f\u007f-\u009f\u202e]/);
   });
 
-  it("does not claim deletion when the inbox file could not be deleted", async () => {
+  it.skipIf(process.platform === "win32")("does not claim deletion when the inbox file could not be deleted", async () => {
     stub({ ListGrokBotAgents: BOTS, SubmitGrokBotSecret: [200, { accepted: true }] });
     secretInbox();
     const file = join(inbox, `submit.${UUID}.e-1`);
@@ -477,7 +477,7 @@ describe("MCP tools", () => {
     expect(text(res)).not.toMatch(/inbox file is deleted/);
   });
 
-  it("stores and deletes a secret by name", async () => {
+  it.skipIf(process.platform === "win32")("stores and deletes a secret by name", async () => {
     stub({ ListGrokBotAgents: BOTS, PutGrokBotSecret: [200, { secret: { name: "API_KEY" } }], DeleteGrokBotSecret: [200, {}] });
     secretInbox();
     writeFileSync(join(inbox, `put.${UUID}.API_KEY`), VALUE);

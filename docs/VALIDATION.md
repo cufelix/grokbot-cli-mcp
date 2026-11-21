@@ -13,7 +13,8 @@ npm run build
 npm run smoke
 ```
 
-The suite currently contains 197 tests in eight files. It covers authorization and exact target selection,
+The suite currently contains 200 test cases in eight files, with platform-specific inbox cases selected by OS.
+It covers authorization and exact target selection,
 single-use inbox handling, metadata-only secret output, omitted protobuf repeated fields, malformed/incomplete
 responses, diagnostics uncertainty, response previews and incremental wait cursors. Cursor tests include pending
 owner requests and streaming entries that mutate in place, including initially empty placeholders.
@@ -51,6 +52,11 @@ Team-secret success and conversion of an inherited plugin skill need suitable sh
 by the personal-bot smoke. The current server restricts named secrets to team-shared bots and rejects conversation
 reset for temporal bots; the client reports these restrictions before dispatching an unsupported write.
 Single-use inbox protections do not isolate files from another process running as the same local user.
+The claimed file stays open throughout delivery and cleanup so immediate inode reuse cannot hide replacement.
+Native Windows inboxes fail closed because POSIX ownership/mode checks cannot verify Windows ACL privacy;
+use WSL or explicit CLI stdin instead. POSIX inbox tests run on macOS/Linux, and Windows runs the refusal checks.
+Secret/skill file readers reject symlinks even when native `O_NOFOLLOW` is unavailable. Output artifacts use POSIX
+mode `0600`; native Windows users should keep their output directory under an appropriate private ACL.
 
 ## Reproducible context measurements
 

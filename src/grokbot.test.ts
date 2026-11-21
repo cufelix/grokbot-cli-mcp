@@ -606,7 +606,7 @@ describe("vault", () => {
     await expect(resolveSecret({ file, stdin: true })).rejects.toThrow(/exactly one/);
   });
 
-  it("takes an MCP password only from the inbox file named after the site", async () => {
+  it.skipIf(process.platform === "win32")("takes an MCP password only from the inbox file named after the site", async () => {
     const inbox = join(tmp(), "inbox");
     process.env.GROKBOT_VAULT_INBOX = inbox;
     try {
