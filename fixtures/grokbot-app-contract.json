@@ -1,0 +1,23 @@
+{
+  "source": "Installed Grok Bot 1.0.3 app.asar, captured 2026-11-21; no user data",
+  "enums": {
+    "GrokBotAutomationAction": [
+      "UNSPECIFIED",
+      "OPEN",
+      "TOGGLE",
+      "EDIT",
+      "DELETE"
+    ]
+  },
+  "messages": {
+    "GrokBotAutomationViewerPermissions": "1 allowed_actions #0*",
+    "GrokBotAgentStatus": "1 agent_id 9|2 live #0?|3 client #1?|4 is_running 8",
+    "GrokBotAgentLiveState": "1 agent_id 9|2 is_running 8|3 is_composing_message 8|4 is_retrying 8|5 activity #0?|6 awaiting #1?|7 updated_at_ms 3|8 stale_after_ms 3|9 box_handoff_request_id 9?|10 box_handoff_instruction 9?|11 session_id 9|12 active_group_member_id 9?|13 has_running_subagents 8|14 surface_task_id 9?|15 working_task_ids 9*|16 last_turn_settlement #2?",
+    "GrokBotTurnSettlement": "1 turn_id 9|2 outcome 9|3 settled_at_ms 3|4 client_nonce 9",
+    "GrokBotAgentAwaitingState": "1 tab_id 9|2 reason 9|3 since_ms 3",
+    "GrokBotVaultCredential": "1 id 9|2 title 9|3 username 9|4 notes 9|5 sites 9*|6 created_at_ms 3|7 updated_at_ms 3|8 card #0?|9 kind #1|10 contact #2?|11 managed_by #3",
+    "GrokBotUserFormVaultEntry": "1 entry_id 9|2 kind 9|3 label 9|4 extra_key 9?|5 value 9|6 created_at_ms 3|7 last_used_at_ms 3|8 origin_host 9?",
+    "DeleteGrokBotAgentAutomationResponse": "1 automations #0*",
+    "PutGrokBotSecretRequest": "1 id 9|2 name 9|3 description 9|4 value 9"
+  }
+}

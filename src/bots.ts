@@ -12,6 +12,7 @@ import { basename, extname, join, resolve } from "node:path";
 export const API = process.env.GROKBOT_BOTS_API ?? "https://api2.cursor.sh/aiserver.v1.GrokBotService";
 
 export interface Bot {
+  id?: string;
   agentId: string;
   name: string;
   description?: string;
@@ -25,6 +26,9 @@ export interface BotEntry {
   file?: { path: string; name: string };
   /** Set when the bot asks to act on the user's computer; the user answers in the Grok Bot app. */
   approval?: { action: string; target: string; status: string };
+  secretRequest?: { pending: boolean };
+  /** The same entry may be updated in place until streaming finishes. */
+  streaming?: boolean;
 }
 
 /** One of the user's own computers the bot can work on, through a running Grok Bot app. */
@@ -75,7 +79,8 @@ function readToken(): string {
   throw new Error("Not signed in to Cursor. Run `grokbot login --cursor` (or `cursor-agent login`), or set CURSOR_ACCESS_TOKEN.");
 }
 
-async function rpc<T>(method: string, body: object, signal?: AbortSignal, retried = false): Promise<T> {
+/** One Connect call against the app's API. Shared with vault.ts, which talks to the same service. */
+export async function rpc<T>(method: string, body: object, signal?: AbortSignal, retried = false): Promise<T> {
   // The token goes with every call: only to Cursor's own servers over HTTPS, also when GROKBOT_BOTS_API is overridden.
   if (!/^https:\/\/[a-z0-9.-]+\.cursor\.sh\//.test(API)) throw new Error(`GROKBOT_BOTS_API must be an https://….cursor.sh/ URL, not ${API}`);
   const timeout = AbortSignal.timeout(30_000);
@@ -87,6 +92,7 @@ async function rpc<T>(method: string, body: object, signal?: AbortSignal, retrie
     signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
   });
   if (res.status === 401 && !retried) {
+    await res.body?.cancel().catch(() => {});
     cachedToken = undefined;
     // An expired token: running cursor-agent refreshes the stored one.
     try {
@@ -96,13 +102,65 @@ async function rpc<T>(method: string, body: object, signal?: AbortSignal, retrie
     }
     return rpc(method, body, signal, true);
   }
-  if (!res.ok) throw new Error(`Grok Bot API ${method} failed (${res.status}): ${(await res.text()).slice(0, 300)}`);
-  return (await res.json()) as T;
+  if (!res.ok) {
+    // The error body is the server's text: control characters (newlines, escapes, bidi marks) go, it is capped, and it is
+    // labelled as what it is, so it can't pose as output of ours.
+    const detail = (await readCapped(res, 4096, false)).replace(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069]/g, " ").slice(0, 300);
+    throw new Error(`Grok Bot API ${method} failed (${res.status}); the server said: «${detail}»`);
+  }
+  const text = await readCapped(res, MAX_RESPONSE);
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    // The parser's own message quotes the body: keep it out of errors.
+    throw new Error(`Grok Bot API ${method} returned something that is not JSON.`);
+  }
+}
+
+/** A response body is at most this big; a transcript page or vault listing is far smaller. */
+const MAX_RESPONSE = 16 * 1024 * 1024;
+
+/**
+ * Reads a body of at most max bytes. Past the limit it stops: strict (a successful reply) throws, otherwise (an error
+ * page) the start is kept. Never holds more than max bytes, however big a single chunk is.
+ */
+async function readCapped(res: Response, max: number, strict = true): Promise<string> {
+  if (!res.body) return "";
+  const reader = res.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  let over = false;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value?.byteLength) continue;
+      if (size + value.byteLength > max) {
+        chunks.push(value.subarray(0, max - size));
+        size = max;
+        over = true;
+        break;
+      }
+      chunks.push(value);
+      size += value.byteLength;
+    }
+  } finally {
+    // Cancelling an unfinished stream must not hang the call.
+    await Promise.race([reader.cancel().catch(() => {}), new Promise((r) => setTimeout(r, 1000).unref())]);
+  }
+  if (over && strict) throw new Error("The Grok Bot API sent a response that is too big.");
+  return Buffer.concat(chunks).toString("utf8");
 }
 
 export async function listBots(): Promise<Bot[]> {
-  const { agents = [] } = await rpc<{ agents?: Bot[] }>("ListGrokBotAgents", {});
-  return agents.map(({ agentId, name, description }) => ({ agentId, name, description }));
+  const { agents } = await rpc<{ agents?: unknown }>("ListGrokBotAgents", {});
+  if (agents !== undefined && !Array.isArray(agents)) throw new Error("The app returned a bot list in an unexpected shape.");
+  if (Array.isArray(agents) && agents.length > 500) throw new Error("Too many bots to resolve a unique target safely.");
+  const text = (x: unknown, max: number) => typeof x === "string" ? x.replace(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069]/g, " ").slice(0, max) : "";
+  return (Array.isArray(agents) ? agents : []).map(raw => {
+    const a = raw && typeof raw === "object" ? raw as Record<string, unknown> : {};
+    return { id: (typeof a.id !== "number" || Number.isSafeInteger(a.id)) && /^\d{1,20}$/.test(String(a.id ?? "")) ? String(a.id) : "", agentId: typeof a.agentId === "string" && /^[A-Za-z0-9_.:-]{1,128}$/.test(a.agentId) ? a.agentId : "", name: text(a.name, 100), description: text(a.description, 500) };
+  });
 }
 
 /** Finds a bot by id, exact name, or name prefix (case-insensitive). With no ref, the first bot (the main one). */
@@ -111,9 +169,18 @@ export function pickBot(bots: Bot[], ref?: string): Bot {
   if (!ref) return bots[0];
   const r = ref.toLowerCase();
   const bot =
-    bots.find((b) => b.agentId === ref || b.name.toLowerCase() === r) ?? bots.find((b) => b.name.toLowerCase().startsWith(r));
+    bots.find((b) => b.id === ref || b.agentId === ref || b.name.toLowerCase() === r) ?? bots.find((b) => b.name.toLowerCase().startsWith(r));
   if (!bot) throw new Error(`No bot named "${ref}". Bots: ${bots.map((b) => b.name).join(", ")}`);
   return bot;
+}
+
+/** For writes that cannot be undone or that act outward: the id or the exact name of one bot, never a prefix or "the first". */
+export function pickBotExact(bots: Bot[], ref: string | undefined): Bot {
+  if (!ref) throw new Error("Name the bot (its exact name or id): this action will not guess which one.");
+  const r = ref.toLowerCase();
+  const hits = bots.filter((b) => b.id === ref || b.agentId === ref || b.name.toLowerCase() === r);
+  if (hits.length !== 1) throw new Error(hits.length ? "More than one bot has that name: use its id." : "No bot has exactly that name or id.");
+  return hits[0];
 }
 
 export async function createBot(name: string, description = ""): Promise<Bot> {
@@ -369,7 +436,7 @@ interface RawEntry {
 }
 
 // C0 controls except tab and newline, DEL, and C1 controls (\u009b starts an escape sequence too).
-const CONTROL = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g;
+const CONTROL = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069]/g;
 
 /** Turns transcript entries into plain messages; tool runs and other internal entries are dropped. */
 export function parseEntries(entries: RawEntry[]): BotEntry[] {
@@ -381,7 +448,11 @@ export function parseEntries(entries: RawEntry[]): BotEntry[] {
       content?: unknown;
       file_path?: unknown;
       file_name?: unknown;
-      message?: { type?: string; content?: unknown; file_name?: unknown; url?: unknown; ask?: { action?: unknown; target?: unknown; status?: unknown } };
+      secretProvided?: unknown;
+      widgetDismissed?: unknown;
+      respondedValue?: unknown;
+      streaming?: unknown;
+      message?: { type?: string; content?: unknown; file_name?: unknown; url?: unknown; ask?: { action?: unknown; target?: unknown; status?: unknown }; approval?: { status?: unknown } };
     };
     try {
       body = JSON.parse(Buffer.from(e.body, "base64").toString("utf8"));
@@ -389,7 +460,7 @@ export function parseEntries(entries: RawEntry[]): BotEntry[] {
       continue;
     }
     const seq = Number(e.seq);
-    if (!Number.isFinite(seq) || !body) continue;
+    if (!Number.isSafeInteger(seq) || seq < 1 || !body) continue;
     // Terminal control characters (ANSI escapes...) are dropped: bot text often quotes web pages.
     const str = (v: unknown) => (typeof v === "string" && v ? v.replace(CONTROL, "") || undefined : undefined);
     if (body.kind === "message" && body.role === "user" && str(body.content)) {
@@ -405,10 +476,18 @@ export function parseEntries(entries: RawEntry[]): BotEntry[] {
         const path = str(m.url);
         out.push({ seq, from: "bot", text: `[file: ${name}]`, ...(path ? { file: { path, name } } : {}) });
       } else if (m.type === "local-tool-permission" && m.ask) {
-        const approval = { action: str(m.ask.action) ?? "act", target: str(m.ask.target) ?? "", status: str(m.ask.status) ?? "pending" };
+        const closed = body.widgetDismissed === true || body.respondedValue != null;
+        const approval = { action: str(m.ask.action) ?? "act", target: str(m.ask.target) ?? "", status: closed ? "closed" : str(m.ask.status) ?? "pending" };
         const state = approval.status === "pending" ? "waiting for approval in the Grok Bot app" : approval.status;
         out.push({ seq, from: "bot", text: `[asks to ${approval.action} on your computer (${state}): ${approval.target}]`, approval });
-      } else if (m.type === "text" && str(m.content)) out.push({ seq, from: "bot", text: str(m.content)! });
+      } else if (m.type === "secret-request") {
+        const pending = body.secretProvided !== true && body.widgetDismissed !== true && body.respondedValue == null;
+        out.push({ seq, from: "bot", text: pending ? "[waiting for a secret; use bot_secrets_list for the request id]" : body.secretProvided === true ? "[secret provided]" : "[secret request closed]", secretRequest: { pending } });
+      } else if (["auto-review-approval", "meeting-join-consent", "cookie-origin-approval", "virtual-card-approval", "connector-grant"].includes(m.type ?? "")) {
+        const status = body.widgetDismissed === true || body.respondedValue != null ? "closed" : str(m.type === "connector-grant" ? m.ask?.status : m.approval?.status) ?? "pending";
+        out.push({ seq, from: "bot", text: `[${m.type}: ${status}; approve in the Grok Bot app]`, approval: { action: m.type!, target: "", status } });
+      } else if (m.type === "text" && (typeof m.content === "string" || body.streaming === true))
+        out.push({ seq, from: "bot", text: str(m.content) ?? "", ...(body.streaming === true ? { streaming: true } : {}) });
     }
   }
   return out.sort((a, b) => a.seq - b.seq);
@@ -467,17 +546,21 @@ export async function botStatus(bot: Bot, signal?: AbortSignal): Promise<BotStat
   const { statuses = [] } = await rpc<{
     statuses?: {
       agentId: string;
+      isRunning?: boolean;
       live?: {
         isRunning?: boolean;
+        isComposingMessage?: boolean;
+        isRetrying?: boolean;
+        hasRunningSubagents?: boolean;
         lastTurnSettlement?: { settledAtMs?: string };
         activity?: { tool?: string; detail?: string };
       };
     }[];
   }>("ListGrokBotAgentStatuses", {}, signal);
-  const live = statuses.find((s) => s.agentId === bot.agentId)?.live;
+  const row = statuses.find((s) => s.agentId === bot.agentId), live = row?.live;
   // isRunning as reported: judging staleness from updatedAtMs would compare the server's clock with ours.
   return {
-    running: live?.isRunning === true,
+    running: row?.isRunning === true || live?.isRunning === true || live?.isComposingMessage === true || live?.isRetrying === true || live?.hasRunningSubagents === true,
     settledAtMs: Number(live?.lastTurnSettlement?.settledAtMs ?? 0),
     activity: live?.activity?.detail || live?.activity?.tool || undefined,
   };
@@ -522,12 +605,20 @@ export interface SendOptions extends WaitOptions {
  * Sends a message as the user (it shows up in the app) and, unless wait is off, returns the bot's replies once it has
  * finished working (see waitForBot).
  */
-export async function sendToBot(bot: Bot, text: string, opts: SendOptions = {}): Promise<{ replies: BotEntry[]; done: boolean }> {
+export interface BotRun {
+  replies: BotEntry[];
+  done: boolean;
+  afterSeq: number;
+  blocked?: "secret" | "approval";
+}
+
+export async function sendToBot(bot: Bot, text: string, opts: SendOptions = {}): Promise<BotRun> {
   const { signal } = opts;
   const uploads = [];
   for (const f of opts.files ?? []) uploads.push(await uploadBotFile(bot, f, signal));
   // Raw seq and the server's own settlement time, so internal entries and clock skew can't confuse what is new.
   const after = maxSeq(await rawEntries(bot, 1, undefined, signal));
+  if (!Number.isSafeInteger(after) || after < 0) throw new Error("The transcript has an invalid sequence number; no message was sent.");
   const settledBefore = (await botStatus(bot, signal)).settledAtMs;
   const res = await rpc<{ dispatched?: boolean; refusal?: unknown }>(
     "SendGrokBotUserMessage",
@@ -544,7 +635,7 @@ export async function sendToBot(bot: Bot, text: string, opts: SendOptions = {}):
     signal,
   );
   if (!res.dispatched) throw new Error(`The bot did not accept the message${res.refusal ? `: ${JSON.stringify(res.refusal)}` : "."}`);
-  if (opts.wait === false) return { replies: [], done: false };
+  if (opts.wait === false) return { replies: [], done: false, afterSeq: after };
   return waitForBot(bot, { ...opts, after, settledBefore });
 }
 
@@ -556,10 +647,17 @@ export async function sendToBot(bot: Bot, text: string, opts: SendOptions = {}):
 export async function waitForBot(
   bot: Bot,
   opts: WaitOptions & { after?: number; settledBefore?: number } = {},
-): Promise<{ replies: BotEntry[]; done: boolean }> {
+): Promise<BotRun> {
+  if (opts.after !== undefined && (!Number.isSafeInteger(opts.after) || opts.after < 0)) throw new Error("after_seq must be a non-negative safe integer.");
   const after = opts.after ?? (await readBot(bot, 30)).findLast((e) => e.from === "you")?.seq ?? 0;
   const settledBefore = opts.settledBefore ?? 0;
   const replies: BotEntry[] = [];
+  const mutable = (entry: BotEntry) => entry.streaming || entry.secretRequest?.pending || entry.approval?.status === "pending";
+  const cursor = () => {
+    const pending = replies.filter(mutable);
+    if (pending.length) return Math.max(after, Math.min(...pending.map(entry => entry.seq)) - 1);
+    return replies.reduce((seq, entry) => Math.max(seq, entry.seq), after);
+  };
   const pollSignal = AbortSignal.any([AbortSignal.timeout(opts.timeoutMs ?? 10 * 60_000), ...(opts.signal ? [opts.signal] : [])]);
   let idlePolls = 0;
   let activity = "";
@@ -578,18 +676,23 @@ export async function waitForBot(
           opts.onReply?.(e);
         }
       }
+      const pendingSecret = replies.find(r => r.secretRequest?.pending);
       const pending = replies.find((r) => r.approval?.status === "pending");
-      const now = pending ? `waiting for your approval in the Grok Bot app (${pending.approval!.action})` : status.running ? status.activity : "";
+      if (pendingSecret || pending) {
+        // Keep a mutable pending entry within the next read window: its state can change without a new seq.
+        return { replies, done: false, blocked: pendingSecret ? "secret" : "approval", afterSeq: cursor() };
+      }
+      const now = status.running ? status.activity : "";
       if (now && now !== activity) opts.onActivity?.((activity = now));
       // Three idle polls in a row: a bot can pause between its "on it" turn and the real work. A bot waiting for the
       // user's approval is not running either, but it isn't done.
-      idlePolls = status.settledAtMs > settledBefore && !status.running && !pending ? idlePolls + 1 : 0;
-      if (idlePolls >= 3) return { replies, done: true };
+      idlePolls = status.settledAtMs > settledBefore && !status.running && !replies.some(mutable) ? idlePolls + 1 : 0;
+      if (idlePolls >= 3) return { replies, done: true, afterSeq: cursor() };
     }
   } catch (err) {
     if (!pollSignal.aborted) throw err;
   }
-  return { replies, done: false };
+  return { replies, done: false, afterSeq: cursor() };
 }
 
 /** Readable, unique model ids: "Grok Bot" -> "grok-bot"; duplicates get -2, -3. */

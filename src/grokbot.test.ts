@@ -1,18 +1,19 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { beforeAll, describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it, vi } from "vitest";
 import { botSlugs, parseEntries, pickBot, pickComputer, safeName, writeNew } from "./bots.js";
 import { registerSkillSearch, SKILL_INDEX_LIMIT, searchSkills } from "./skills.js";
 import { buildPrompt, canWrite, describeCursorTool, parseToolCalls, visibleText } from "./cursor.js";
 import grokbotExtension, { isBareLogin, LOGIN_CHOICES } from "./extension.js";
-import { type AgentEvent, agentArgs, attachable, createGrokMcpServer, formatAgentRun, saveDir, summarizeAgentEvents } from "./mcp.js";
+import { ADMIN_TOOLS, type AgentEvent, agentArgs, attachable, createGrokMcpServer, formatAgentRun, saveDir, summarizeAgentEvents } from "./mcp.js";
 import { browserCommand } from "./login.js";
 import { configureEnv, DEFAULT_MODEL, seedDefaultModel } from "./setup.js";
 import { isPrivateAddress, loadImage, outputPath, sniffImage } from "./xai.js";
+import { checkSite, clean, createLogin, createLoginFromInbox, isSecretField, putFormEntry, readSecretFile, resolveSecret, vaultInbox } from "./vault.js";
 
 const tmp = () => mkdtempSync(join(tmpdir(), "grokbot-test-"));
 
@@ -108,17 +109,42 @@ async function connect() {
 }
 
 describe("MCP server", () => {
+  it("offers the tools that delete or act outward only with GROKBOT_MCP_ADMIN=1", async () => {
+    const admin = [
+      "automation_delete", "automation_run", "automation_set_enabled", "bot_delete", "bot_fresh_conversation",
+      "bot_secret_delete", "bot_skill_make_private", "bot_skill_put", "bot_skill_remove", "bot_update",
+      "vault_delete", "vault_form_delete",
+    ];
+    const names = async () => (await (await connect()).listTools()).tools.map((t) => t.name);
+    expect((await names()).filter((n) => admin.includes(n))).toEqual([]);
+    vi.stubEnv("GROKBOT_MCP_ADMIN", "1");
+    try {
+      const all = await names();
+      for (const n of admin) expect(all).toContain(n);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("exposes the Grok tools", async () => {
     const { tools } = await (await connect()).listTools();
     expect(tools.map((t) => t.name).sort()).toEqual([
+      "automation_list",
+      "automation_transcript",
       "bot_computers",
       "bot_create",
       "bot_download",
       "bot_files",
+      "bot_info",
       "bot_list",
       "bot_read",
+      "bot_secret_put",
+      "bot_secrets_list",
       "bot_send",
+      "bot_skills_list",
+      "bot_status",
       "bot_stop",
+      "bot_submit_secret",
       "bot_wait",
       "grok_agent",
       "grok_ask",
@@ -127,6 +153,11 @@ describe("MCP server", () => {
       "grok_models",
       "grok_search_web",
       "grok_search_x",
+      "grokbot_doctor",
+      "vault_add_login",
+      "vault_form_put",
+      "vault_forms",
+      "vault_list",
     ]);
   });
 
@@ -135,6 +166,44 @@ describe("MCP server", () => {
     const byName = Object.fromEntries(tools.map((t) => [t.name, t.annotations]));
     expect(byName.grok_agent).toMatchObject({ destructiveHint: true });
     expect(byName.grok_search_x).toMatchObject({ readOnlyHint: true });
+    expect(byName.vault_list).toMatchObject({ readOnlyHint: true });
+    expect(byName.vault_delete).toBeUndefined(); // admin only
+  });
+
+  it("refuses oversized JSON listings rather than returning clipped invalid JSON", async () => {
+    vi.stubEnv("CURSOR_ACCESS_TOKEN", "test-only");
+    vi.stubGlobal("fetch", async () => new Response(JSON.stringify({
+      agents: Array.from({ length: 100 }, (_, i) => ({ id: String(i + 1), agentId: `uuid-${i}`, name: "n".repeat(100), description: "d".repeat(500), harness: "temporal", viewerIsOwner: true })),
+    })));
+    try {
+      const client = await connect();
+      try {
+        const result = await client.callTool({ name: "bot_list", arguments: { json: true } });
+        expect(result.isError).toBe(true);
+        expect(JSON.stringify(result.content)).toContain("JSON output limit");
+      } finally { await client.close(); }
+    } finally { vi.unstubAllGlobals(); vi.unstubAllEnvs(); }
+  });
+
+  it("annotates the admin-only tools as destructive when the switch is on", async () => {
+    vi.stubEnv("GROKBOT_MCP_ADMIN", "1");
+    try {
+      const { tools } = await (await connect()).listTools();
+      for (const t of tools.filter((t) => ADMIN_TOOLS.has(t.name))) expect(t.annotations, t.name).toMatchObject({ destructiveHint: true });
+      expect(tools.filter((t) => ADMIN_TOOLS.has(t.name)).length).toBe(ADMIN_TOOLS.size);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("takes no password, env var or path in a vault tool's own arguments", async () => {
+    const { tools } = await (await connect()).listTools();
+    const add = tools.find((t) => t.name === "vault_add_login");
+    // The password comes from ~/.grokbot/vault-inbox/<site>, which the user fills: a `password`, `password_env` or
+    // path argument here would let the model see a secret, or send any local one (a Cursor token) to a host of its choice.
+    expect(Object.keys(add?.inputSchema.properties ?? {}).sort()).toEqual(["notes", "site", "title", "username"]);
+    const formPut = tools.find((t) => t.name === "vault_form_put");
+    expect(Object.keys(formPut?.inputSchema.properties ?? {})).not.toContain("id");
   });
 
   it("restricts a read_only agent to read/search tools without MCP", () => {
@@ -214,7 +283,7 @@ describe("summarizeAgentEvents", () => {
       costUsd: 0.01,
     });
     expect(formatAgentRun(run)).toBe(
-      "Done: 3 tests fail.\n\nTools used: bash, read(failed)\n\nsession_id: s-1 | cost: $0.0100",
+      "session_id: s-1 | cost: $0.0100\n\nDone: 3 tests fail.\n\nTools used: bash, read(failed)",
     );
   });
 
@@ -450,7 +519,7 @@ describe("Grok Bot app client", () => {
   it("saves into the temp folder as asked, project files only under .grokbot/bot-files, never elsewhere", () => {
     expect(saveDir("qa", tmp())).toMatch(/[\\/]\.grokbot[\\/]bot-files[\\/]qa$/);
     expect(saveDir(join(tmp(), "shots"))).toMatch(/shots$/);
-    const project = mkdtempSync(join(homedir(), "grokbot-test-"));
+    const project = mkdtempSync(join(process.cwd(), "grokbot-test-"));
     try {
       expect(saveDir(undefined, project)).toBe(join(project, ".grokbot", "bot-files"));
       expect(saveDir("tests", project)).toBe(join(project, ".grokbot", "bot-files", "tests"));
@@ -498,5 +567,100 @@ describe("Grok Bot app client", () => {
     expect(() => pickBot(bots, "nope")).toThrow(/Bots: Grok Bot, giggle work/);
     expect(() => pickBot([], undefined)).toThrow(/No Grok Bot bots/);
     expect(botSlugs([...bots, { agentId: "a3", name: "Grok  Bot!" }])).toEqual(["grok-bot", "giggle-work", "grok-bot-2"]);
+  });
+});
+
+describe("vault", () => {
+  it("takes a bare DNS host as a site and refuses URLs, wildcards and malformed labels", () => {
+    expect(checkSite("  App.Example.COM. ")).toBe("app.example.com");
+    expect(checkSite("example.xn--p1ai")).toBe("example.xn--p1ai");
+    for (const bad of ["https://app.example.com", "app.example.com/login", "*.example.com", "localhost", "example..com", ".example.com", "a.-b.com", "a-.example.com", `${"a".repeat(64)}.com`])
+      expect(() => checkSite(bad)).toThrow(/host/);
+  });
+
+  it("flags secret-shaped form fields without catching ordinary ones", () => {
+    for (const label of ["password", "Passphrase", "passcode", "CVV", "security code", "2FA", "one-time code", "recovery codes", "API key", "ssh_key", "seed phrase", "session cookie", "refreshToken", "clientSecret", "creditCardNumber", "pass\u200bword", "rodné číslo"])
+      expect(isSecretField(`login ${label}`), label).toBe(true);
+    for (const label of ["phone", "secretary", "street", "postal code", "company", "tokenization preference"])
+      expect(isSecretField(`profile ${label}`)).toBe(false);
+  });
+
+  it("refuses a secret as a readable form answer before any network call", async () => {
+    await expect(putFormEntry({ kind: "login", label: "password", value: "x" })).rejects.toThrow(/Save it as a login/);
+    await expect(putFormEntry({ kind: "a", label: "b", value: "line\u001b[2Jfake" })).rejects.toThrow(/Control characters/);
+  });
+
+  it("reads a password only from a small regular file of the user's, never through a symlink or a FIFO", async () => {
+    const dir = tmp();
+    const file = join(dir, "pw");
+    writeFileSync(file, "from-file\n");
+    expect(readSecretFile(file)).toBe("from-file");
+    symlinkSync(file, join(dir, "link"));
+    expect(() => readSecretFile(join(dir, "link"))).toThrow(/symlink/);
+    writeFileSync(join(dir, "big"), "x".repeat(5000));
+    expect(() => readSecretFile(join(dir, "big"))).toThrow(/too big/);
+    expect(() => readSecretFile(dir)).toThrow(/regular file/);
+    linkSync(file, join(dir, "hard"));
+    expect(() => readSecretFile(file)).toThrow(/hard links/);
+    await expect(resolveSecret({})).rejects.toThrow(/exactly one/);
+    await expect(resolveSecret({ file, stdin: true })).rejects.toThrow(/exactly one/);
+  });
+
+  it("takes an MCP password only from the inbox file named after the site", async () => {
+    const inbox = join(tmp(), "inbox");
+    process.env.GROKBOT_VAULT_INBOX = inbox;
+    try {
+      await expect(createLoginFromInbox({ site: "app.example.com", title: "t", username: "u" })).rejects.toThrow(
+        /No password for app\.example\.com waiting/,
+      );
+      // A failed save hands the staged file back instead of losing it (no token here, so the save fails).
+      writeFileSync(join(inbox, "app.example.com"), "pw\n");
+      await expect(createLoginFromInbox({ site: "app.example.com", title: "t", username: "u" })).rejects.toThrow();
+      expect(readFileSync(join(inbox, "app.example.com"), "utf8")).toBe("pw\n");
+      chmodSync(inbox, 0o755);
+      expect(() => vaultInbox()).toThrow(/chmod 700/);
+    } finally {
+      delete process.env.GROKBOT_VAULT_INBOX;
+    }
+  });
+
+  it("needs a title, a password and a site before it will save a login", async () => {
+    const login = { title: "", username: "a", password: "b", sites: ["app.example.com"] };
+    await expect(createLogin(login)).rejects.toThrow(/title/);
+    await expect(createLogin({ ...login, title: "t", password: "" })).rejects.toThrow(/password/);
+    await expect(createLogin({ ...login, title: "t", sites: [] })).rejects.toThrow(/site/);
+    await expect(createLogin({ ...login, title: "t", sites: Array(11).fill("a.example.com") })).rejects.toThrow(/At most 10/);
+  });
+
+  it("cleans what the vault returns: control characters, unknown kinds, non-array fields", () => {
+    expect(clean("ok\u001b[31mred\nnext")).toBe("ok [31mred next");
+    expect(clean(42)).toBe("");
+  });
+
+  // Last in the file: it signs in with a fake token, which the bots client then keeps for the process.
+  it("never shows the server's reply to a call that carried a password", async () => {
+    const realFetch = globalThis.fetch;
+    process.env.CURSOR_ACCESS_TOKEN = "test-token";
+    const secret = "hunter2-very-secret";
+    try {
+      for (const [status, body] of [
+        [400, `{"message":"bad request","echo":"${secret}"}`],
+        [200, `not json ${secret}`],
+        [200, JSON.stringify({ results: [{ error: `rejected ${secret}` }] })],
+        [200, JSON.stringify({ results: [{ credential: { id: "ok-1", title: secret } }] })],
+        [200, JSON.stringify({ results: [{ credential: { id: secret } }] })],
+        [404, "x"],
+      ] as const) {
+        globalThis.fetch = (async () => new Response(body, { status })) as typeof fetch;
+        const outcome = await createLogin({ title: "Acme", username: "u", password: secret, sites: ["app.example.com"] }).then(
+          (r) => JSON.stringify(r),
+          (e: Error) => e.message,
+        );
+        expect(outcome).not.toContain(secret);
+      }
+    } finally {
+      globalThis.fetch = realFetch;
+      delete process.env.CURSOR_ACCESS_TOKEN;
+    }
   });
 });
