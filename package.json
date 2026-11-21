@@ -9,13 +9,18 @@
   "files": [
     "dist",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "skills"
   ],
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "prepublishOnly": "npm run build && npm test"
+    "prepublishOnly": "npm run build && npm test",
+    "smoke": "node scripts/smoke.mjs node dist/cli.js",
+    "test:live": "node scripts/smoke-live.mjs",
+    "check:app": "node scripts/check-app-contract.mjs",
+    "measure:context": "node scripts/measure-context.mjs"
   },
   "keywords": [
     "grok",

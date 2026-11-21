@@ -13,9 +13,13 @@ import {
   stopBot,
   waitForBot,
 } from "./bots.js";
+import { listManagedBots } from "./manage.js";
+import { formatBotList, publicBotInfo } from "./inspection.js";
 
 const USAGE = `Usage:
-  grokbot bot list                         your bots in the Grok Bot app
+  grokbot bot list [--ids] [--json]         bots; --ids prints numeric ids and UUIDs
+  grokbot bot info BOT [--json]             metadata and available operations
+  grokbot bot status [--bot BOT] [--json]    working, blocked, error, idle or unknown
   grokbot bot create NAME [DESCRIPTION]    create a new bot
   grokbot bot send [--bot NAME] [--file PATH]... [--computer[=NAME]] [--download DIR] [--no-wait] [--] MESSAGE
                                            message a bot (default: your main bot) and print its replies;
@@ -69,8 +73,12 @@ function positional(args: string[], max: number): string[] {
 export async function botCommand(argv: string[]): Promise<number> {
   const [cmd, ...args] = argv;
   try {
+    if (!cmd || cmd === "help" || cmd === "--help") { console.log(USAGE); return 0; }
     if (cmd === "list") {
-      for (const b of await listBots()) console.log(`${b.name}${b.description ? `  (${b.description})` : ""}`);
+      const ids = args.includes("--ids"), json = args.includes("--json");
+      if (args.some(a => !["--ids", "--json"].includes(a)) || new Set(args).size !== args.length) throw new Error("Usage: grokbot bot list [--ids] [--json]");
+      const bots = await listManagedBots(undefined, true);
+      console.log(json ? JSON.stringify(bots.map(publicBotInfo), null, 2) : formatBotList(bots, ids));
       return 0;
     }
     if (cmd === "create") {
@@ -111,14 +119,14 @@ export async function botCommand(argv: string[]): Promise<number> {
       positional(args, 0);
       const controller = new AbortController();
       process.once("SIGINT", () => controller.abort());
-      const { replies, done } = await waitForBot(bot, {
+      const { replies, done, blocked } = await waitForBot(bot, {
         timeoutMs: 30 * 60_000,
         signal: controller.signal,
         onReply: (e) => console.log(`${e.text}${e.file ? `  ${e.file.path}` : ""}\n`),
         onActivity: (a) => process.stderr.write(`  … ${a}\n`),
       });
       if (dir) await saveFiles(bot, replies.filter((e) => e.file).map((e) => e.file!), dir, controller.signal);
-      if (!done) process.stderr.write(`${bot.name} is still working.\n`);
+      if (!done) process.stderr.write(blocked ? `${bot.name} is waiting for owner input (${blocked}) in the Grok Bot app.\n` : `${bot.name} is still working.\n`);
       return 0;
     }
     if (cmd === "send" || cmd === "read") {
@@ -144,7 +152,7 @@ export async function botCommand(argv: string[]): Promise<number> {
       const text = [...rest, ...tail].join(" ").trim();
       if (!text) throw new Error("Nothing to send.");
       if (!noWait) process.stderr.write(`→ ${bot.name} (the reply also shows in the Grok Bot app)\n`);
-      const { replies, done } = await sendToBot(bot, text, {
+      const { replies, done, blocked } = await sendToBot(bot, text, {
         wait: !noWait,
         signal: controller.signal,
         files,
@@ -153,7 +161,7 @@ export async function botCommand(argv: string[]): Promise<number> {
         onActivity: (a) => process.stderr.write(`  … ${a}\n`),
       });
       if (dir) await saveFiles(bot, replies.filter((e) => e.file).map((e) => e.file!), dir, controller.signal);
-      if (!noWait && !done) process.stderr.write(`${bot.name} is still working; check the app or \`grokbot bot read\`.\n`);
+      if (!noWait && !done) process.stderr.write(blocked ? `${bot.name} is waiting for owner input (${blocked}) in the Grok Bot app.\n` : `${bot.name} is still working; check the app or \`grokbot bot read\`.\n`);
       return 0;
     }
     console.log(USAGE);

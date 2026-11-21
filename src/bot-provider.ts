@@ -47,12 +47,12 @@ export function streamBot(model: Model<Api>, context: TranscriptContext, options
     stream.push({ type: "start", partial: output });
     stream.push({ type: "text_start", contentIndex: 0, partial: output });
     const bot = { agentId: botIds.get(model.id) ?? model.id, name: model.name };
-    const { done } = await sendToBot(bot, lastUserText(context), {
+    const { done, blocked } = await sendToBot(bot, lastUserText(context), {
       signal: options?.signal,
       onReply: (e) => add(`${block.text ? "\n\n" : ""}${e.text}`),
     });
     if (options?.signal?.aborted) throw new Error("aborted");
-    if (!done) add(`${block.text ? "\n\n" : ""}_${model.name} is still working; the rest will show in the Grok Bot app._`);
+    if (!done) add(`${block.text ? "\n\n" : ""}_${blocked ? `Waiting for owner input (${blocked}) in the Grok Bot app.` : `${model.name} is still working; the rest will show in the Grok Bot app.`}_`);
     stream.push({ type: "text_end", contentIndex: 0, content: block.text, partial: output });
     stream.push({ type: "done", reason: "stop", message: output });
     stream.end();

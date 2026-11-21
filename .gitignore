@@ -1,4 +1,4 @@
-node_modules/
+node_modules
 dist/
 *.tgz
 .grokbot/
@@ -6,3 +6,5 @@ dist/
 .serena/
 .env
 film/.hyperframes/
+
+.worktrees/
